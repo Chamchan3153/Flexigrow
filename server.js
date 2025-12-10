@@ -340,8 +340,8 @@ app.get('/api/data', async (req, res) => {
   }
 });
 
-// Start server
-app.listen(PORT, '0.0.0.0', () => {
+// Start server - FIXED FOR RAILWAY
+app.listen(PORT, () => {
   console.log(`🚀 Custom Backend Server running on port ${PORT}`);
   console.log(`📊 Node.js Version: ${process.version}`);
   console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
