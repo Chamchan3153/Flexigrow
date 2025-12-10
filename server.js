@@ -4,7 +4,14 @@ const sql = require('mssql');
 require('dotenv').config();
 
 const app = express();
+// Railway sets PORT automatically - use it or default to 3000
 const PORT = process.env.PORT || 3000;
+
+// Log startup info immediately
+console.log('🚀 Starting FlexiGrow Backend...');
+console.log(`📊 Node.js Version: ${process.version}`);
+console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
+console.log(`🔌 Port: ${PORT}`);
 
 // Middleware
 app.use(cors());
@@ -134,6 +141,56 @@ app.get('/test', async (req, res) => {
   }
 });
 
+// List all tables endpoint - Diagnostic tool
+app.get('/api/tables', async (req, res) => {
+  try {
+    console.log('🔍 Listing all tables in database...');
+    const connection = await getConnection();
+
+    const query = `
+      SELECT 
+        TABLE_SCHEMA,
+        TABLE_NAME,
+        TABLE_TYPE
+      FROM INFORMATION_SCHEMA.TABLES
+      WHERE TABLE_TYPE = 'BASE TABLE'
+      ORDER BY TABLE_SCHEMA, TABLE_NAME
+    `;
+
+    const result = await connection.request().query(query);
+    console.log(`📋 Found ${result.recordset.length} tables`);
+
+    const tables = result.recordset.map(row => ({
+      schema: row.TABLE_SCHEMA,
+      name: row.TABLE_NAME,
+      fullName: `${row.TABLE_SCHEMA}.${row.TABLE_NAME}`
+    }));
+
+    // Also search for tables with keywords
+    const keywords = ['Business', 'Written', 'Loan', 'Premium', 'Policy', 'Commission', 'Transaction', 'Client', 'Customer'];
+    const matchingTables = tables.filter(table => 
+      keywords.some(keyword => table.name.toLowerCase().includes(keyword.toLowerCase()))
+    );
+
+    return res.status(200).json({
+      success: true,
+      totalTables: tables.length,
+      allTables: tables,
+      matchingTables: matchingTables,
+      keywords: keywords,
+      timestamp: new Date().toISOString()
+    });
+
+  } catch (error) {
+    console.error('❌ Error listing tables:', error.message);
+    return res.status(500).json({
+      success: false,
+      error: error.message,
+      timestamp: new Date().toISOString()
+    });
+  }
+});
+
 // Main data endpoint
 app.get('/api/data', async (req, res) => {
   try {
@@ -150,33 +207,41 @@ app.get('/api/data', async (req, res) => {
 
     const connection = await getConnection();
 
-    // Step 1: Find the Business Written table
-    console.log('🔍 Searching for Business Written table...');
+    // Step 1: Find the Business Written table by looking for key columns
+    console.log('🔍 Searching for Business Written table with columns: LOAN ID, CLIENT ID, PREMIUM, COMMISSION...');
     
+    // First, find tables that have the key columns we need
     const tableSearchQuery = `
-      SELECT TABLE_SCHEMA, TABLE_NAME
-      FROM INFORMATION_SCHEMA.TABLES
-      WHERE TABLE_TYPE = 'BASE TABLE'
+      SELECT DISTINCT 
+        t.TABLE_SCHEMA,
+        t.TABLE_NAME
+      FROM INFORMATION_SCHEMA.TABLES t
+      INNER JOIN INFORMATION_SCHEMA.COLUMNS c ON t.TABLE_SCHEMA = c.TABLE_SCHEMA 
+        AND t.TABLE_NAME = c.TABLE_NAME
+      WHERE t.TABLE_TYPE = 'BASE TABLE'
       AND (
-        TABLE_NAME LIKE '%Business%Written%' 
-        OR TABLE_NAME LIKE '%Business_Written%'
-        OR TABLE_NAME LIKE '%BusinessWritten%'
-        OR TABLE_NAME LIKE '%Loan%'
-        OR TABLE_NAME LIKE '%Premium%'
-        OR TABLE_NAME LIKE '%Policy%'
-        OR TABLE_NAME LIKE '%Commission%'
-        OR TABLE_NAME LIKE '%Transaction%'
+        -- Look for tables with key columns
+        (c.COLUMN_NAME LIKE '%Loan%ID%' OR c.COLUMN_NAME LIKE '%LoanId%' OR c.COLUMN_NAME LIKE '%Loan_ID%')
+        AND (c.COLUMN_NAME LIKE '%Client%ID%' OR c.COLUMN_NAME LIKE '%ClientId%' OR c.COLUMN_NAME LIKE '%Client_ID%')
+        AND (c.COLUMN_NAME LIKE '%Premium%' OR c.COLUMN_NAME LIKE '%Commission%')
+      )
+      OR (
+        -- Also check table names
+        t.TABLE_NAME LIKE '%Business%Written%' 
+        OR t.TABLE_NAME LIKE '%Business_Written%'
+        OR t.TABLE_NAME LIKE '%BusinessWritten%'
+        OR t.TABLE_NAME LIKE '%Loan%'
+        OR t.TABLE_NAME LIKE '%Policy%'
+        OR t.TABLE_NAME LIKE '%Transaction%'
       )
       ORDER BY 
         CASE 
-          WHEN TABLE_NAME LIKE '%Business%Written%' THEN 1
-          WHEN TABLE_NAME LIKE '%Business_Written%' THEN 2
-          WHEN TABLE_NAME LIKE '%BusinessWritten%' THEN 3
-          WHEN TABLE_NAME LIKE '%Loan%' THEN 4
-          WHEN TABLE_NAME LIKE '%Policy%' THEN 5
-          ELSE 6
+          WHEN t.TABLE_NAME LIKE '%Business%Written%' THEN 1
+          WHEN t.TABLE_NAME LIKE '%Business_Written%' THEN 2
+          WHEN t.TABLE_NAME LIKE '%BusinessWritten%' THEN 3
+          ELSE 4
         END,
-        TABLE_NAME
+        t.TABLE_NAME
     `;
 
     const tablesResult = await connection.request().query(tableSearchQuery);
@@ -233,24 +298,27 @@ app.get('/api/data', async (req, res) => {
 
     console.log(`📅 Date column: ${dateColumn || 'NOT FOUND - will query all rows'}`);
 
-    // Step 4: Build optimized query
+    // Step 4: Build query with columns matching Business Written report
+    // Report columns: DATE, LOAN ID, CLIENT ID, CLIENT NAME, USER, SOURCE,
+    // PREMIUM, AMENDMENT, ADMIN FEE, TOTAL INTEREST (%), TOTAL INTEREST ($),
+    // COMMISSION (%), COMMISSION ($), FINANCED ($), INCOME ($)
+    
+    const reportColumnPatterns = [
+      'date', 'loan', 'client', 'user', 'source', 'premium', 'amendment',
+      'admin', 'fee', 'interest', 'commission', 'financed', 'income'
+    ];
+
     const keyColumns = columns.filter(col => {
       const lower = col.toLowerCase();
-      return lower.includes('date') || 
-             lower.includes('loan') || 
-             lower.includes('client') || 
-             lower.includes('premium') || 
-             lower.includes('amount') ||
-             lower.includes('fee') ||
-             lower.includes('commission') ||
-             lower.includes('policy') ||
-             lower.includes('user') ||
-             lower.includes('source');
+      return reportColumnPatterns.some(pattern => lower.includes(pattern));
     });
 
-    const selectColumns = keyColumns.length > 0 
-      ? [...keyColumns, ...columns.filter(c => !keyColumns.includes(c))].slice(0, 50)
-      : columns.slice(0, 50);
+    // Prioritize date column, then key columns, then others
+    const selectColumns = [
+      dateColumn,
+      ...keyColumns.filter(c => c !== dateColumn),
+      ...columns.filter(c => c !== dateColumn && !keyColumns.includes(c))
+    ].filter(Boolean).slice(0, 50);
 
     const selectList = selectColumns.map(col => `[${col}]`).join(', ');
     
@@ -340,13 +408,36 @@ app.get('/api/data', async (req, res) => {
   }
 });
 
-// Start server - FIXED FOR RAILWAY
-app.listen(PORT, () => {
-  console.log(`🚀 Custom Backend Server running on port ${PORT}`);
+// Start server
+// Railway requires listening on 0.0.0.0 and using PORT env variable
+const server = app.listen(PORT, '0.0.0.0', () => {
+  console.log(`✅ Custom Backend Server running on port ${PORT}`);
   console.log(`📊 Node.js Version: ${process.version}`);
   console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
-  console.log(`🔗 Health check: http://localhost:${PORT}/health`);
-  console.log(`📈 Data endpoint: http://localhost:${PORT}/api/data`);
+  console.log(`🔗 Health check: http://0.0.0.0:${PORT}/health`);
+  console.log(`📈 Data endpoint: http://0.0.0.0:${PORT}/api/data`);
+  console.log(`🎉 Server is ready to accept connections!`);
+});
+
+// Handle server errors
+server.on('error', (error) => {
+  console.error('❌ Server Error:', error);
+  if (error.code === 'EADDRINUSE') {
+    console.error(`❌ Port ${PORT} is already in use!`);
+  }
+  process.exit(1);
+});
+
+// Handle uncaught exceptions
+process.on('uncaughtException', (error) => {
+  console.error('❌ Uncaught Exception:', error);
+  process.exit(1);
+});
+
+// Handle unhandled promise rejections
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('❌ Unhandled Rejection at:', promise, 'reason:', reason);
+  process.exit(1);
 });
 
 // Graceful shutdown
